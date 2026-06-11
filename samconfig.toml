@@ -1,0 +1,38 @@
+# SAM CLI Configuration - Parametrizado por ambiente
+# Uso: sam deploy --config-env <ambiente>
+
+version = 0.1
+
+[default.build.parameters]
+use_container = false
+parallel = true
+
+[dev.deploy.parameters]
+stack_name = "siniestros-dev"
+resolve_s3 = true
+s3_prefix = "siniestros-dev"
+region = "us-east-1"
+capabilities = "CAPABILITY_IAM CAPABILITY_AUTO_EXPAND"
+confirm_changeset = false
+parameter_overrides = "Environment=dev LogLevel=DEBUG RetentionDays=7"
+tags = "Environment=dev Project=siniestros Team=devops"
+
+[staging.deploy.parameters]
+stack_name = "siniestros-staging"
+resolve_s3 = true
+s3_prefix = "siniestros-staging"
+region = "us-east-1"
+capabilities = "CAPABILITY_IAM CAPABILITY_AUTO_EXPAND"
+confirm_changeset = false
+parameter_overrides = "Environment=staging LogLevel=INFO RetentionDays=30"
+tags = "Environment=staging Project=siniestros Team=devops"
+
+[prod.deploy.parameters]
+stack_name = "siniestros-prod"
+resolve_s3 = true
+s3_prefix = "siniestros-prod"
+region = "us-east-1"
+capabilities = "CAPABILITY_IAM CAPABILITY_AUTO_EXPAND"
+confirm_changeset = true
+parameter_overrides = "Environment=prod LogLevel=WARN RetentionDays=365"
+tags = "Environment=prod Project=siniestros Team=devops Compliance=SFC"

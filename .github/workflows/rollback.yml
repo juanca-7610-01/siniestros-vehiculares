@@ -1,0 +1,84 @@
+name: Rollback
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to rollback'
+        required: true
+        type: choice
+        options:
+          - dev
+          - staging
+          - prod
+      confirm:
+        description: 'Type CONFIRM to proceed'
+        required: true
+        type: string
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: us-east-1
+
+jobs:
+  rollback:
+    name: Rollback ${{ inputs.environment }}
+    runs-on: ubuntu-latest
+    if: inputs.confirm == 'CONFIRM'
+    environment: ${{ inputs.environment }}
+    steps:
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Get previous Lambda versions
+        id: versions
+        run: |
+          ENV=${{ inputs.environment }}
+          echo "Rolling back siniestros-$ENV..."
+          
+          # Get current alias version for claims
+          CLAIMS_VERSION=$(aws lambda get-alias \
+            --function-name siniestros-claims-$ENV \
+            --name live \
+            --query 'FunctionVersion' --output text)
+          echo "Current claims version: $CLAIMS_VERSION"
+          
+          # Rollback to previous version
+          PREV_VERSION=$((CLAIMS_VERSION - 1))
+          if [ $PREV_VERSION -gt 0 ]; then
+            aws lambda update-alias \
+              --function-name siniestros-claims-$ENV \
+              --name live \
+              --function-version $PREV_VERSION
+            echo "Claims rolled back to version $PREV_VERSION"
+          fi
+          
+          # Same for documents
+          DOCS_VERSION=$(aws lambda get-alias \
+            --function-name siniestros-documents-$ENV \
+            --name live \
+            --query 'FunctionVersion' --output text)
+          PREV_DOCS=$((DOCS_VERSION - 1))
+          if [ $PREV_DOCS -gt 0 ]; then
+            aws lambda update-alias \
+              --function-name siniestros-documents-$ENV \
+              --name live \
+              --function-version $PREV_DOCS
+            echo "Documents rolled back to version $PREV_DOCS"
+          fi
+
+      - name: Verify rollback
+        run: |
+          ENV=${{ inputs.environment }}
+          echo "Verifying rollback..."
+          aws lambda get-alias --function-name siniestros-claims-$ENV --name live
+          aws lambda get-alias --function-name siniestros-documents-$ENV --name live
+          echo "## Rollback Complete" >> $GITHUB_STEP_SUMMARY
+          echo "Environment: $ENV" >> $GITHUB_STEP_SUMMARY
+          echo "Time: $(date -u)" >> $GITHUB_STEP_SUMMARY

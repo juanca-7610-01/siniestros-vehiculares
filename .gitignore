@@ -1,0 +1,28 @@
+# Dependencies
+node_modules/
+package-lock.json
+
+# SAM
+.aws-sam/
+samconfig.toml.bak
+
+# Environment
+.env
+.env.local
+*.env
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build
+dist/
+build/
+coverage/
+
+# Logs
+*.log

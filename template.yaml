@@ -1,0 +1,469 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Siniestros Vehiculares - Aplicación serverless para registro de siniestros.
+  Aseguradora colombiana - Regulación SFC.
+
+Parameters:
+  Environment:
+    Type: String
+    AllowedValues: [dev, staging, prod]
+    Default: dev
+  LogLevel:
+    Type: String
+    Default: INFO
+    AllowedValues: [DEBUG, INFO, WARN, ERROR]
+  RetentionDays:
+    Type: Number
+    Default: 30
+    AllowedValues: [7, 14, 30, 90, 365]
+
+Globals:
+  Function:
+    Runtime: nodejs20.x
+    Architectures: [arm64]
+    Timeout: 30
+    MemorySize: 256
+    Tracing: Active
+    Environment:
+      Variables:
+        ENVIRONMENT: !Ref Environment
+        LOG_LEVEL: !Ref LogLevel
+        TABLE_NAME: !Ref SiniestrosTable
+        POWERTOOLS_SERVICE_NAME: siniestros-app
+
+Conditions:
+  IsProd: !Equals [!Ref Environment, prod]
+  IsNotDev: !Not [!Equals [!Ref Environment, dev]]
+
+Resources:
+  # ============================================
+  # DynamoDB - Tabla de Siniestros
+  # ============================================
+  SiniestrosTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: !If [IsProd, Retain, Delete]
+    Properties:
+      TableName: !Sub siniestros-${Environment}
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: PK
+          AttributeType: S
+        - AttributeName: SK
+          AttributeType: S
+        - AttributeName: GSI1PK
+          AttributeType: S
+        - AttributeName: GSI1SK
+          AttributeType: S
+      KeySchema:
+        - AttributeName: PK
+          KeyType: HASH
+        - AttributeName: SK
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: GSI1
+          KeySchema:
+            - AttributeName: GSI1PK
+              KeyType: HASH
+            - AttributeName: GSI1SK
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: !If [IsProd, true, false]
+      SSESpecification:
+        SSEEnabled: true
+        SSEType: KMS
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Application
+          Value: siniestros-vehiculares
+        - Key: Compliance
+          Value: SFC
+
+  # ============================================
+  # API Gateway
+  # ============================================
+  SiniestrosApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      Name: !Sub siniestros-api-${Environment}
+      StageName: !Ref Environment
+      TracingEnabled: true
+      AccessLogSetting:
+        DestinationArn: !GetAtt ApiAccessLogGroup.Arn
+        Format: >-
+          {"requestId":"$context.requestId","ip":"$context.identity.sourceIp",
+          "requestTime":"$context.requestTime","httpMethod":"$context.httpMethod",
+          "path":"$context.path","status":"$context.status",
+          "responseLength":"$context.responseLength","userAgent":"$context.identity.userAgent"}
+      MethodSettings:
+        - MetricsEnabled: true
+          ResourcePath: "/*"
+          HttpMethod: "*"
+          DataTraceEnabled: !If [IsProd, false, true]
+          LoggingLevel: !If [IsProd, ERROR, INFO]
+      Cors:
+        AllowMethods: "'GET,POST,PATCH,OPTIONS'"
+        AllowHeaders: "'Content-Type,Authorization,X-Amz-Date'"
+        AllowOrigin: "'*'"
+
+  ApiAccessLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/apigateway/siniestros-${Environment}
+      RetentionInDays: !Ref RetentionDays
+
+  # ============================================
+  # Lambda - Claims
+  # ============================================
+  ClaimsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub siniestros-claims-${Environment}
+      Handler: index.handler
+      CodeUri: src/claims/
+      Description: Registro, consulta y actualización de siniestros
+      AutoPublishAlias: live
+      DeploymentPreference:
+        Type: !If [IsProd, Canary10Percent5Minutes, AllAtOnce]
+        Alarms:
+          - !Ref ClaimsErrorAlarm
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref SiniestrosTable
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - secretsmanager:GetSecretValue
+              Resource: !Sub arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:siniestros/${Environment}/*
+            - Effect: Allow
+              Action:
+                - kms:Decrypt
+              Resource: '*'
+              Condition:
+                StringEquals:
+                  kms:ViaService: !Sub secretsmanager.${AWS::Region}.amazonaws.com
+      Events:
+        CreateClaim:
+          Type: Api
+          Properties:
+            RestApiId: !Ref SiniestrosApi
+            Path: /api/v1/claims
+            Method: POST
+        GetClaim:
+          Type: Api
+          Properties:
+            RestApiId: !Ref SiniestrosApi
+            Path: /api/v1/claims/{id}
+            Method: GET
+        UpdateClaim:
+          Type: Api
+          Properties:
+            RestApiId: !Ref SiniestrosApi
+            Path: /api/v1/claims/{id}
+            Method: PATCH
+
+  ClaimsLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/siniestros-claims-${Environment}
+      RetentionInDays: !Ref RetentionDays
+
+  # ============================================
+  # Lambda - Documents
+  # ============================================
+  DocumentsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub siniestros-documents-${Environment}
+      Handler: index.handler
+      CodeUri: src/documents/
+      Description: Generación y almacenamiento de reportes PDF
+      Timeout: 60
+      MemorySize: 512
+      AutoPublishAlias: live
+      DeploymentPreference:
+        Type: !If [IsProd, Canary10Percent5Minutes, AllAtOnce]
+        Alarms:
+          - !Ref DocumentsErrorAlarm
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref SiniestrosTable
+        - S3CrudPolicy:
+            BucketName: !Ref DocumentsBucket
+      Events:
+        GenerateReport:
+          Type: Api
+          Properties:
+            RestApiId: !Ref SiniestrosApi
+            Path: /api/v1/documents/report
+            Method: POST
+
+  DocumentsLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/siniestros-documents-${Environment}
+      RetentionInDays: !Ref RetentionDays
+
+  # ============================================
+  # S3 - Documents Bucket
+  # ============================================
+  DocumentsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub siniestros-documents-${Environment}-${AWS::AccountId}
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: TransitionToIA
+            Status: Enabled
+            Transitions:
+              - StorageClass: STANDARD_IA
+                TransitionInDays: 90
+
+  # ============================================
+  # S3 - Frontend Bucket
+  # ============================================
+  FrontendBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub siniestros-frontend-${Environment}-${AWS::AccountId}
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      WebsiteConfiguration:
+        IndexDocument: index.html
+        ErrorDocument: index.html
+
+  FrontendBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref FrontendBucket
+      PolicyDocument:
+        Statement:
+          - Sid: AllowCloudFrontOAC
+            Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action: s3:GetObject
+            Resource: !Sub ${FrontendBucket.Arn}/*
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub arn:aws:cloudfront::${AWS::AccountId}:distribution/${CloudFrontDistribution}
+
+  # ============================================
+  # CloudFront
+  # ============================================
+  CloudFrontOAC:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub siniestros-oac-${Environment}
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  CloudFrontDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        DefaultRootObject: index.html
+        HttpVersion: http2and3
+        PriceClass: PriceClass_100
+        Comment: !Sub Siniestros Frontend - ${Environment}
+        Origins:
+          - Id: S3Origin
+            DomainName: !GetAtt FrontendBucket.RegionalDomainName
+            OriginAccessControlId: !Ref CloudFrontOAC
+            S3OriginConfig:
+              OriginAccessIdentity: ""
+          - Id: ApiOrigin
+            DomainName: !Sub ${SiniestrosApi}.execute-api.${AWS::Region}.amazonaws.com
+            CustomOriginConfig:
+              HTTPSPort: 443
+              OriginProtocolPolicy: https-only
+        DefaultCacheBehavior:
+          TargetOriginId: S3Origin
+          ViewerProtocolPolicy: redirect-to-https
+          CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6  # CachingOptimized
+          Compress: true
+        CacheBehaviors:
+          - PathPattern: /api/*
+            TargetOriginId: ApiOrigin
+            ViewerProtocolPolicy: https-only
+            CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad  # CachingDisabled
+            OriginRequestPolicyId: b689b0a8-53d0-40ab-baf2-68738e2966ac  # AllViewerExceptHostHeader
+            AllowedMethods: [GET, HEAD, OPTIONS, PUT, POST, PATCH, DELETE]
+        CustomErrorResponses:
+          - ErrorCode: 403
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+          - ErrorCode: 404
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+
+  # ============================================
+  # CloudWatch Alarms
+  # ============================================
+  ClaimsErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub siniestros-claims-errors-${Environment}
+      AlarmDescription: Claims Lambda error rate high
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref ClaimsFunction
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 3
+      Threshold: 5
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
+  DocumentsErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub siniestros-documents-errors-${Environment}
+      AlarmDescription: Documents Lambda error rate high
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref DocumentsFunction
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 3
+      Threshold: 5
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
+  ApiLatencyAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub siniestros-api-latency-${Environment}
+      AlarmDescription: API Gateway P99 latency too high
+      Namespace: AWS/ApiGateway
+      MetricName: Latency
+      Dimensions:
+        - Name: ApiName
+          Value: !Sub siniestros-api-${Environment}
+      ExtendedStatistic: p99
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 3000
+      ComparisonOperator: GreaterThanThreshold
+
+  # ============================================
+  # CloudWatch Dashboard
+  # ============================================
+  MonitoringDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Condition: IsNotDev
+    Properties:
+      DashboardName: !Sub siniestros-${Environment}
+      DashboardBody: !Sub |
+        {
+          "widgets": [
+            {
+              "type": "metric",
+              "properties": {
+                "title": "Lambda Invocations",
+                "metrics": [
+                  ["AWS/Lambda", "Invocations", "FunctionName", "siniestros-claims-${Environment}"],
+                  ["AWS/Lambda", "Invocations", "FunctionName", "siniestros-documents-${Environment}"]
+                ],
+                "period": 300,
+                "stat": "Sum"
+              }
+            },
+            {
+              "type": "metric",
+              "properties": {
+                "title": "Lambda Errors",
+                "metrics": [
+                  ["AWS/Lambda", "Errors", "FunctionName", "siniestros-claims-${Environment}"],
+                  ["AWS/Lambda", "Errors", "FunctionName", "siniestros-documents-${Environment}"]
+                ],
+                "period": 300,
+                "stat": "Sum"
+              }
+            },
+            {
+              "type": "metric",
+              "properties": {
+                "title": "Lambda Duration (P99)",
+                "metrics": [
+                  ["AWS/Lambda", "Duration", "FunctionName", "siniestros-claims-${Environment}"],
+                  ["AWS/Lambda", "Duration", "FunctionName", "siniestros-documents-${Environment}"]
+                ],
+                "period": 300,
+                "stat": "p99"
+              }
+            },
+            {
+              "type": "metric",
+              "properties": {
+                "title": "API Gateway 4xx/5xx",
+                "metrics": [
+                  ["AWS/ApiGateway", "4XXError", "ApiName", "siniestros-api-${Environment}"],
+                  ["AWS/ApiGateway", "5XXError", "ApiName", "siniestros-api-${Environment}"]
+                ],
+                "period": 300,
+                "stat": "Sum"
+              }
+            },
+            {
+              "type": "metric",
+              "properties": {
+                "title": "DynamoDB Read/Write Capacity",
+                "metrics": [
+                  ["AWS/DynamoDB", "ConsumedReadCapacityUnits", "TableName", "siniestros-${Environment}"],
+                  ["AWS/DynamoDB", "ConsumedWriteCapacityUnits", "TableName", "siniestros-${Environment}"]
+                ],
+                "period": 300,
+                "stat": "Sum"
+              }
+            }
+          ]
+        }
+
+Outputs:
+  ApiUrl:
+    Description: API Gateway URL
+    Value: !Sub https://${SiniestrosApi}.execute-api.${AWS::Region}.amazonaws.com/${Environment}
+  CloudFrontUrl:
+    Description: CloudFront Distribution URL
+    Value: !Sub https://${CloudFrontDistribution.DomainName}
+  CloudFrontDistributionId:
+    Description: CloudFront Distribution ID (for invalidation)
+    Value: !Ref CloudFrontDistribution
+  FrontendBucketName:
+    Description: Frontend S3 Bucket
+    Value: !Ref FrontendBucket
+  DocumentsBucketName:
+    Description: Documents S3 Bucket
+    Value: !Ref DocumentsBucket
+  ClaimsFunctionArn:
+    Description: Claims Lambda ARN
+    Value: !GetAtt ClaimsFunction.Arn
+  DocumentsFunctionArn:
+    Description: Documents Lambda ARN
+    Value: !GetAtt DocumentsFunction.Arn

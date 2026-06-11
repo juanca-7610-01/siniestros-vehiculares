@@ -1,0 +1,11 @@
+{
+  "Environment": "staging",
+  "LogLevel": "INFO",
+  "RetentionDays": "30",
+  "Tags": {
+    "Environment": "staging",
+    "Project": "siniestros-vehiculares",
+    "Team": "devops",
+    "CostCenter": "qa"
+  }
+}

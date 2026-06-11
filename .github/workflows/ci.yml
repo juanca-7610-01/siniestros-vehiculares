@@ -1,0 +1,165 @@
+name: CI - Build, Test & Security Scan
+
+on:
+  pull_request:
+    branches: [main, staging, develop]
+  push:
+    branches: [develop]
+
+permissions:
+  contents: read
+  security-events: write
+  actions: read
+
+env:
+  NODE_VERSION: '20'
+
+jobs:
+  # ==========================================
+  # Lint & Validate IaC
+  # ==========================================
+  validate:
+    name: Validate IaC
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python (for cfn-lint)
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install validation tools
+        run: |
+          pip install cfn-lint checkov
+
+      - name: Validate SAM template (cfn-lint)
+        run: cfn-lint template.yaml
+
+      - name: Security scan IaC (Checkov)
+        run: |
+          checkov -f template.yaml --framework cloudformation --soft-fail
+        continue-on-error: true
+
+  # ==========================================
+  # Build & Test
+  # ==========================================
+  build-and-test:
+    name: Build & Test
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        function: [claims, documents]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: src/${{ matrix.function }}/package.json
+
+      - name: Install dependencies
+        working-directory: src/${{ matrix.function }}
+        run: npm ci
+
+      - name: Run linter
+        working-directory: src/${{ matrix.function }}
+        run: npm run lint --if-present
+        continue-on-error: true
+
+      - name: Run unit tests
+        working-directory: src/${{ matrix.function }}
+        run: npm test --if-present
+        continue-on-error: true
+
+  # ==========================================
+  # Security - SAST (CodeQL)
+  # ==========================================
+  sast:
+    name: SAST - CodeQL
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: javascript
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:javascript"
+
+  # ==========================================
+  # Security - SCA (Dependency Check)
+  # ==========================================
+  sca:
+    name: SCA - Dependency Audit
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        function: [claims, documents]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install dependencies
+        working-directory: src/${{ matrix.function }}
+        run: npm ci
+
+      - name: npm audit
+        working-directory: src/${{ matrix.function }}
+        run: npm audit --audit-level=high
+        continue-on-error: true
+
+  # ==========================================
+  # Security - Secrets Detection
+  # ==========================================
+  secrets-scan:
+    name: Secrets Detection
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: TruffleHog - Secrets Scan
+        uses: trufflesecurity/trufflehog@main
+        with:
+          extra_args: --only-verified
+        continue-on-error: true
+
+  # ==========================================
+  # SAM Build
+  # ==========================================
+  sam-build:
+    name: SAM Build
+    runs-on: ubuntu-latest
+    needs: [validate, build-and-test]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup SAM CLI
+        uses: aws-actions/setup-sam@v2
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: SAM Build
+        run: sam build
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sam-build
+          path: .aws-sam/
+          retention-days: 1

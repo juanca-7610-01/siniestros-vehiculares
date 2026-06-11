@@ -1,0 +1,11 @@
+{
+  "Environment": "dev",
+  "LogLevel": "DEBUG",
+  "RetentionDays": "7",
+  "Tags": {
+    "Environment": "dev",
+    "Project": "siniestros-vehiculares",
+    "Team": "devops",
+    "CostCenter": "development"
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "Environment": "prod",
+  "LogLevel": "WARN",
+  "RetentionDays": "365",
+  "Tags": {
+    "Environment": "prod",
+    "Project": "siniestros-vehiculares",
+    "Team": "devops",
+    "CostCenter": "production",
+    "Compliance": "SFC",
+    "DataClassification": "PII"
+  }
+}
