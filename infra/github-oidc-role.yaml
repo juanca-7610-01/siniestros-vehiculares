@@ -1,0 +1,122 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  OIDC Role para GitHub Actions - Permite que los workflows de GitHub 
+  se autentiquen con AWS sin access keys.
+
+Parameters:
+  GitHubOrg:
+    Type: String
+    Default: juanca-7610-01
+    Description: GitHub username u organización
+  GitHubRepo:
+    Type: String
+    Default: siniestros-vehiculares
+    Description: Nombre del repositorio
+
+Resources:
+  # Proveedor de identidad OIDC de GitHub
+  GitHubOIDCProvider:
+    Type: AWS::IAM::OIDCProvider
+    Properties:
+      Url: https://token.actions.githubusercontent.com
+      ClientIdList:
+        - sts.amazonaws.com
+      ThumbprintList:
+        - 6938fd4d98bab03faadb97b34396831e3780aea1
+        - 1c58a3a8518e8759bf075b76b750d4f2df264fcd
+
+  # Rol que asume GitHub Actions
+  GitHubActionsRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: github-actions-siniestros-deploy
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !GetAtt GitHubOIDCProvider.Arn
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+              StringLike:
+                token.actions.githubusercontent.com:sub: !Sub repo:${GitHubOrg}/${GitHubRepo}:*
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AWSCloudFormationFullAccess
+        - arn:aws:iam::aws:policy/AmazonS3FullAccess
+        - arn:aws:iam::aws:policy/CloudFrontFullAccess
+      Policies:
+        - PolicyName: SiniestrosDeployPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # Lambda
+              - Effect: Allow
+                Action:
+                  - lambda:*
+                Resource: !Sub arn:aws:lambda:*:${AWS::AccountId}:function:siniestros-*
+              # DynamoDB
+              - Effect: Allow
+                Action:
+                  - dynamodb:*
+                Resource: !Sub arn:aws:dynamodb:*:${AWS::AccountId}:table/siniestros-*
+              # API Gateway
+              - Effect: Allow
+                Action:
+                  - apigateway:*
+                Resource: '*'
+              # IAM (para crear roles de Lambda)
+              - Effect: Allow
+                Action:
+                  - iam:CreateRole
+                  - iam:DeleteRole
+                  - iam:AttachRolePolicy
+                  - iam:DetachRolePolicy
+                  - iam:PutRolePolicy
+                  - iam:DeleteRolePolicy
+                  - iam:GetRole
+                  - iam:GetRolePolicy
+                  - iam:PassRole
+                  - iam:TagRole
+                  - iam:UntagRole
+                Resource: !Sub arn:aws:iam::${AWS::AccountId}:role/siniestros-*
+              # CloudWatch
+              - Effect: Allow
+                Action:
+                  - logs:*
+                  - cloudwatch:*
+                Resource: '*'
+              # CodeDeploy (para canary deployments)
+              - Effect: Allow
+                Action:
+                  - codedeploy:*
+                Resource: '*'
+              # Secrets Manager (read only)
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                  - secretsmanager:DescribeSecret
+                Resource: !Sub arn:aws:secretsmanager:*:${AWS::AccountId}:secret:siniestros/*
+              # KMS
+              - Effect: Allow
+                Action:
+                  - kms:Decrypt
+                  - kms:DescribeKey
+                  - kms:GenerateDataKey
+                Resource: '*'
+              # SAM needs to manage its own bucket
+              - Effect: Allow
+                Action:
+                  - s3:CreateBucket
+                  - s3:PutBucketPolicy
+                  - s3:GetBucketPolicy
+                Resource: !Sub arn:aws:s3:::aws-sam-cli-managed-default-*
+
+Outputs:
+  RoleArn:
+    Description: ARN del rol para GitHub Actions (copiar a GitHub Secrets como AWS_ROLE_ARN)
+    Value: !GetAtt GitHubActionsRole.Arn
+  OIDCProviderArn:
+    Description: ARN del OIDC Provider
+    Value: !GetAtt GitHubOIDCProvider.Arn
