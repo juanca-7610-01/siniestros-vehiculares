@@ -68,11 +68,11 @@ jobs:
 
       - name: Install dependencies - claims
         working-directory: src/claims
-        run: npm ci --omit=dev
+        run: npm install --omit=dev
 
       - name: Install dependencies - documents
         working-directory: src/documents
-        run: npm ci --omit=dev
+        run: npm install --omit=dev
 
       - name: SAM Build
         run: sam build
@@ -234,7 +234,7 @@ jobs:
       - name: Build Frontend
         working-directory: frontend
         run: |
-          npm ci
+          npm install
           npm run build
         continue-on-error: true
 

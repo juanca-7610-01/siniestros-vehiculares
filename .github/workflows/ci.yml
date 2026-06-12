@@ -57,12 +57,10 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
-          cache: 'npm'
-          cache-dependency-path: src/${{ matrix.function }}/package.json
 
       - name: Install dependencies
         working-directory: src/${{ matrix.function }}
-        run: npm ci
+        run: npm install
 
       - name: Run linter
         working-directory: src/${{ matrix.function }}
@@ -112,7 +110,7 @@ jobs:
 
       - name: Install dependencies
         working-directory: src/${{ matrix.function }}
-        run: npm ci
+        run: npm install
 
       - name: npm audit
         working-directory: src/${{ matrix.function }}
